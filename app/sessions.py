@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date
 
-from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
@@ -35,6 +35,7 @@ class Session:
     expected_dob: date | None
     created: float = field(default_factory=time.time)
     doc: Extracted | None = None
+    doc_source: str | None = None
     id_face: face.Face | None = None
     selfie_face: face.Face | None = None
     liveness_issues: list[str] | None = None
@@ -105,9 +106,13 @@ def make_router(require_key) -> APIRouter:
         return StepResult(ok=f is not None, issues=[] if f else ["no face found on the front of the ID; retake"])
 
     @router.post("/{session_id}/id-back", response_model=StepResult)
-    async def id_back(image: UploadFile = File(...), s: Session = Depends(_client_session)):
-        doc, issues = await run_in_threadpool(read_document, await _image(image, "image"))
-        s.doc, s.steps["id_back"] = doc, not issues
+    async def id_back(
+        image: UploadFile = File(...),
+        barcode_text: str | None = Form(None, description="Raw PDF417 text decoded on the phone (fallback)"),
+        s: Session = Depends(_client_session),
+    ):
+        doc, issues, source = await run_in_threadpool(read_document, await _image(image, "image"), barcode_text)
+        s.doc, s.doc_source, s.steps["id_back"] = doc, source, not issues
         return StepResult(ok=not issues, issues=[i + "; retake" for i in issues])
 
     @router.post("/{session_id}/selfie", response_model=StepResult)
@@ -127,6 +132,7 @@ def make_router(require_key) -> APIRouter:
         result = build_result(
             s.doc or Extracted(), s.id_face, s.selfie_face, s.min_age, s.expected_name, s.expected_dob,
             s.liveness_issues if s.liveness_issues is not None else ["selfie step not completed"],
+            s.doc_source,
         )
         return SessionStatus(session_id=s.id, complete=complete, steps=s.steps, result=result)
 

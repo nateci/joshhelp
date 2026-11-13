@@ -99,6 +99,13 @@ You can call a step again to retake it; the new upload replaces the old one. Ste
 ```
 `verified` is `true` only when every check that applies passes. A check is `null` when it wasn't evaluated (for example, `name_match` when you didn't send `expected_name`). `issues` explains any failure in plain English.
 
+## Lenient mode (current setting)
+Barcode scanning is deliberately over-forgiving right now, so users with hard-to-scan phones aren't blocked:
+- The phone scanner sends the barcode text it decoded (`barcode_text`) along with the image. If the server can't decode the image itself, it accepts the phone's text, and the result shows `checks.barcode_source: "client"`. When the server reads the image itself, it shows `"server"`.
+- `document_readable` only requires a date of birth and an expiration date. The name is optional.
+
+**Trade-off:** a tampered client could send fake barcode text, for example a fake birth date. The face match and liveness checks still have to pass. To tighten this later, have Dibs require `barcode_source == "server"`, or remove the `barcode_text` fallback in `app/verify.py`.
+
 ## Limitations (compared with Stripe)
 - The liveness check stops printed photos and photos on a screen. It does **not** stop a replayed video of the person turning their head, masks, or deepfakes. Stripe uses certified commercial liveness for those.
 - Only IDs with an AAMVA barcode are supported (US and Canadian licenses and state IDs). Passports would need MRZ parsing.

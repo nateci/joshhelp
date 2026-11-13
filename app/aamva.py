@@ -42,6 +42,9 @@ def _variants(img: np.ndarray):
         yield clahe.apply(g)
         yield cv2.GaussianBlur(g, (0, 0), 1.0)  # smooths sensor noise / moire on the bars
         yield cv2.addWeighted(g, 1.6, cv2.GaussianBlur(g, (0, 0), 2.0), -0.6, 0)  # unsharp mask for soft focus
+        # morphological closing: same idea as zxing-wasm's tryDenoise, which the phone scanner uses
+        yield cv2.morphologyEx(g, cv2.MORPH_CLOSE, np.ones((2, 2), np.uint8))
+        yield cv2.morphologyEx(g, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
 
 
 def read_barcode(img: np.ndarray) -> str | None:

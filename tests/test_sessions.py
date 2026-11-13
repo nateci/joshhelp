@@ -72,6 +72,24 @@ def test_retake_after_bad_barcode(client):
     assert good["ok"] is True
 
 
+def test_lenient_falls_back_to_phone_decoded_text(client, monkeypatch):
+    sid, auth = _start(client)
+    # server can't read the image, but the phone sent the text it decoded
+    r = client.post(f"/sessions/{sid}/id-back", files={"image": _blank_png()}, data={"barcode_text": SAMPLE},
+                    headers=auth).json()
+    assert r["ok"] is True
+    status = client.get(f"/sessions/{sid}").json()
+    assert status["result"]["checks"]["barcode_source"] == "client"
+    assert status["result"]["extracted"]["last_name"] == "SAMPLE"
+
+
+def test_server_decode_preferred_over_phone_text(client):
+    sid, auth = _start(client)
+    client.post(f"/sessions/{sid}/id-back", files={"image": _barcode_png(SAMPLE)}, data={"barcode_text": "junk"},
+                headers=auth)
+    assert client.get(f"/sessions/{sid}").json()["result"]["checks"]["barcode_source"] == "server"
+
+
 def test_client_token_required(client):
     sid, _ = _start(client)
     r = client.post(f"/sessions/{sid}/id-back", files={"image": _blank_png()}, headers={"Authorization": "Bearer nope"})

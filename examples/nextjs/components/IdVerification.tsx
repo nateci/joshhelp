@@ -41,14 +41,18 @@ export default function IdVerification({ onDone }: { onDone?: (verified: boolean
     return r.ok && body.ok;
   }
 
-  async function uploadPhoto(path: "id-front" | "id-back", file: Blob, next: Step) {
+  async function uploadPhoto(path: "id-front" | "id-back", file: Blob, next: Step, barcodeText?: string) {
     const form = new FormData();
     form.append("image", file, path === "id-back" ? "id_back.png" : "id_front.jpg");
+    if (barcodeText) form.append("barcode_text", barcodeText); // server falls back to this if it can't read the image
     if (await upload(path, form)) setStep(next);
   }
 
   // Stable reference so the scanner's camera effect doesn't restart on every render.
-  const onBarcode = useCallback((png: Blob) => uploadPhoto("id-back", png, "selfie"), [session]);
+  const onBarcode = useCallback(
+    (image: Blob, text?: string) => uploadPhoto("id-back", image, "selfie", text),
+    [session],
+  );
 
   async function uploadSelfie(frames: Blob[]) {
     const form = new FormData();

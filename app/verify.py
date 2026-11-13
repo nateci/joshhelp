@@ -22,6 +22,9 @@ class Checks(BaseModel):
     face_in_selfie: bool
     face_match: bool | None
     face_similarity: float | None
+    # "server" = we decoded the barcode image ourselves; "client" = we trusted the text the phone
+    # decoded (lenient mode: a tampered client could fake it). Tighten later by requiring "server".
+    barcode_source: str | None = None
     liveness: bool | None = None  # only set by the session flow (head-turn frames)
     name_match: bool | None = None  # only set when expected_name is sent
     dob_match: bool | None = None  # only set when expected_dob is sent
@@ -54,16 +57,21 @@ def decode_image(data: bytes, field: str) -> np.ndarray:
     return img
 
 
-def read_document(back: np.ndarray) -> tuple[Extracted, list[str]]:
-    """Read the barcode on the back of the ID. Returns extracted fields + issues."""
-    text = aamva.read_barcode(back)
+def read_document(back: np.ndarray, client_text: str | None = None) -> tuple[Extracted, list[str], str | None]:
+    """Read the barcode on the back of the ID. Returns extracted fields, issues, and where the
+    barcode text came from: "server" (we decoded the image) or "client" (we couldn't, so we
+    fell back to the text the phone's scanner decoded; LENIENT MODE, see barcode_source)."""
+    text, source = aamva.read_barcode(back), "server"
+    if not text and client_text:
+        text, source = client_text, "client"
     if not text:
-        return Extracted(), ["no PDF417 barcode found on id_back"]
+        return Extracted(), ["no PDF417 barcode found on id_back"], None
     info = aamva.parse_aamva(text)
     ext = Extracted(**{k: v for k, v in info.items() if k in Extracted.model_fields})
-    if not (ext.name and ext.date_of_birth and ext.expiration):
-        return ext, ["barcode found but name/date_of_birth/expiration missing"]
-    return ext, []
+    # Lenient: only DOB + expiration are required (they drive the age and expiry checks).
+    if not (ext.date_of_birth and ext.expiration):
+        return ext, ["barcode found but date_of_birth/expiration missing"], source
+    return ext, [], source
 
 
 def _age(dob: date, today: date) -> int:
@@ -82,12 +90,13 @@ def build_result(
     expected_name: str | None = None,
     expected_dob: date | None = None,
     liveness_issues: list[str] | None = None,
+    barcode_source: str | None = None,
 ) -> VerifyResult:
     """Turn already-analyzed pieces into the final result. liveness_issues=None means not checked."""
     ext = ext.model_copy()
     today = date.today()
     issues: list[str] = []
-    readable = bool(ext.name and ext.date_of_birth and ext.expiration)
+    readable = bool(ext.date_of_birth and ext.expiration)
     if not readable:
         issues.append("document not readable")
 
@@ -136,6 +145,7 @@ def build_result(
         face_in_selfie=selfie_face is not None,
         face_match=match,
         face_similarity=sim,
+        barcode_source=barcode_source,
         liveness=liveness,
         name_match=name_match,
         dob_match=dob_match,
@@ -157,7 +167,8 @@ def verify(
     front = decode_image(id_front, "id_front")
     back = decode_image(id_back, "id_back")
     selfie_img = decode_image(selfie, "selfie")
-    ext, _ = read_document(back)
+    ext, _, source = read_document(back)
     return build_result(
-        ext, face.analyze(front), face.analyze(selfie_img), min_age, expected_name, expected_dob
+        ext, face.analyze(front), face.analyze(selfie_img), min_age, expected_name, expected_dob,
+        barcode_source=source,
     )
