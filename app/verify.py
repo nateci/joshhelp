@@ -22,6 +22,7 @@ class Checks(BaseModel):
     face_in_selfie: bool
     face_match: bool | None
     face_similarity: float | None
+    liveness: bool | None = None  # only set by the session flow (head-turn frames)
     name_match: bool | None = None  # only set when expected_name is sent
     dob_match: bool | None = None  # only set when expected_dob is sent
 
@@ -53,6 +54,18 @@ def decode_image(data: bytes, field: str) -> np.ndarray:
     return img
 
 
+def read_document(back: np.ndarray) -> tuple[Extracted, list[str]]:
+    """Read the barcode on the back of the ID. Returns extracted fields + issues."""
+    text = aamva.read_barcode(back)
+    if not text:
+        return Extracted(), ["no PDF417 barcode found on id_back"]
+    info = aamva.parse_aamva(text)
+    ext = Extracted(**{k: v for k, v in info.items() if k in Extracted.model_fields})
+    if not (ext.name and ext.date_of_birth and ext.expiration):
+        return ext, ["barcode found but name/date_of_birth/expiration missing"]
+    return ext, []
+
+
 def _age(dob: date, today: date) -> int:
     return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
 
@@ -61,29 +74,22 @@ def _norm(name: str) -> set[str]:
     return set(re.sub(r"[^a-z ]", "", name.lower()).split())
 
 
-def verify(
-    id_front: bytes,
-    id_back: bytes,
-    selfie: bytes,
+def build_result(
+    ext: Extracted,
+    id_face: face.Face | None,
+    selfie_face: face.Face | None,
     min_age: int = 18,
     expected_name: str | None = None,
     expected_dob: date | None = None,
+    liveness_issues: list[str] | None = None,
 ) -> VerifyResult:
-    front = decode_image(id_front, "id_front")
-    back = decode_image(id_back, "id_back")
-    selfie_img = decode_image(selfie, "selfie")
+    """Turn already-analyzed pieces into the final result. liveness_issues=None means not checked."""
+    ext = ext.model_copy()
     today = date.today()
     issues: list[str] = []
-
-    # --- Document (barcode on the back) ---
-    text = aamva.read_barcode(back)
-    info = aamva.parse_aamva(text) if text else {}
-    if not text:
-        issues.append("no PDF417 barcode found on id_back")
-    ext = Extracted(**{k: v for k, v in info.items() if k in Extracted.model_fields})
     readable = bool(ext.name and ext.date_of_birth and ext.expiration)
-    if text and not readable:
-        issues.append("barcode found but name/date_of_birth/expiration missing")
+    if not readable:
+        issues.append("document not readable")
 
     not_expired = ext.expiration >= today if ext.expiration else None
     if not_expired is False:
@@ -96,7 +102,6 @@ def verify(
         if not age_ok:
             issues.append(f"age {ext.age} is under minimum {min_age}")
 
-    # --- Optional cross-checks against what the user typed into the app ---
     name_match = dob_match = None
     if expected_name is not None:
         name_match = bool(ext.name) and _norm(expected_name) <= _norm(ext.name)
@@ -107,9 +112,6 @@ def verify(
         if not dob_match:
             issues.append("expected_dob does not match the ID")
 
-    # --- Face match (ID photo vs selfie) ---
-    id_face = face.embed_largest_face(front)
-    selfie_face = face.embed_largest_face(selfie_img)
     if id_face is None:
         issues.append("no face found on id_front")
     if selfie_face is None:
@@ -121,6 +123,11 @@ def verify(
         if not match:
             issues.append("selfie does not match the ID photo")
 
+    liveness = None
+    if liveness_issues is not None:
+        liveness = not liveness_issues
+        issues += liveness_issues
+
     checks = Checks(
         document_readable=readable,
         not_expired=not_expired,
@@ -129,9 +136,28 @@ def verify(
         face_in_selfie=selfie_face is not None,
         face_match=match,
         face_similarity=sim,
+        liveness=liveness,
         name_match=name_match,
         dob_match=dob_match,
     )
     required = [readable, not_expired, age_ok, match]
-    required += [c for c in (name_match, dob_match) if c is not None]
+    required += [c for c in (liveness, name_match, dob_match) if c is not None]
     return VerifyResult(verified=all(c is True for c in required), checks=checks, extracted=ext, issues=issues)
+
+
+def verify(
+    id_front: bytes,
+    id_back: bytes,
+    selfie: bytes,
+    min_age: int = 18,
+    expected_name: str | None = None,
+    expected_dob: date | None = None,
+) -> VerifyResult:
+    """One-shot check (no liveness): all three images at once."""
+    front = decode_image(id_front, "id_front")
+    back = decode_image(id_back, "id_back")
+    selfie_img = decode_image(selfie, "selfie")
+    ext, _ = read_document(back)
+    return build_result(
+        ext, face.analyze(front), face.analyze(selfie_img), min_age, expected_name, expected_dob
+    )

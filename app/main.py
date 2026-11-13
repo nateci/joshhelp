@@ -1,6 +1,7 @@
 import base64
 import binascii
 import os
+import secrets
 from contextlib import asynccontextmanager
 from datetime import date
 
@@ -10,10 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import face
+from .sessions import make_router
 from .verify import BadImage, VerifyResult, verify
 
-API_KEY = os.getenv("VERIFY_API_KEY")  # if set, callers must send X-API-Key
+API_KEY = os.getenv("VERIFY_API_KEY")  # if set, server-to-server calls must send X-API-Key
 CORS_ORIGINS = [o for o in os.getenv("CORS_ORIGINS", "*").split(",") if o]
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -21,13 +24,16 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="ID Verification API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="ID Verification API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 
 def require_key(x_api_key: str | None = Header(default=None)) -> None:
-    if API_KEY and x_api_key != API_KEY:
+    if API_KEY and not secrets.compare_digest(x_api_key or "", API_KEY):
         raise HTTPException(401, "invalid or missing X-API-Key")
+
+
+app.include_router(make_router(require_key))
 
 
 async def _run(**kwargs) -> VerifyResult:
@@ -42,15 +48,16 @@ def health():
     return {"ok": True}
 
 
-@app.post("/verify", response_model=VerifyResult, dependencies=[Depends(require_key)])
+@app.post("/verify", response_model=VerifyResult, dependencies=[Depends(require_key)], tags=["one-shot"])
 async def verify_multipart(
     id_front: UploadFile = File(..., description="Front of the ID (photo side)"),
     id_back: UploadFile = File(..., description="Back of the ID (PDF417 barcode)"),
-    selfie: UploadFile = File(..., description="Selfie captured by the app"),
+    selfie: UploadFile = File(..., description="Selfie"),
     min_age: int = Form(18),
     expected_name: str | None = Form(None),
     expected_dob: date | None = Form(None),
 ):
+    """Server-to-server, all images at once, no liveness. Prefer the /sessions flow."""
     return await _run(
         id_front=await id_front.read(),
         id_back=await id_back.read(),
@@ -77,7 +84,7 @@ def _b64(value: str, field: str) -> bytes:
         raise HTTPException(400, f"{field} is not valid base64")
 
 
-@app.post("/verify/json", response_model=VerifyResult, dependencies=[Depends(require_key)])
+@app.post("/verify/json", response_model=VerifyResult, dependencies=[Depends(require_key)], tags=["one-shot"])
 async def verify_json(body: VerifyJSON):
     return await _run(
         id_front=_b64(body.id_front, "id_front"),
