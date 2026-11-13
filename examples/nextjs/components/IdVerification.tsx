@@ -2,7 +2,8 @@
 // Step-by-step ID verification UI: front of ID -> back of ID -> head-turn selfie -> result.
 // Drop into any page: <IdVerification onDone={(ok) => router.push(ok ? "/home" : "/help")} />
 // Works in mobile browsers (needs HTTPS for the camera, which Vercel gives you).
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import BarcodeScanner from "./BarcodeScanner";
 
 type Step = "intro" | "front" | "back" | "selfie" | "checking" | "done";
 type Session = { sessionId: string; clientToken: string; apiUrl: string };
@@ -40,11 +41,14 @@ export default function IdVerification({ onDone }: { onDone?: (verified: boolean
     return r.ok && body.ok;
   }
 
-  async function uploadPhoto(path: "id-front" | "id-back", file: File, next: Step) {
+  async function uploadPhoto(path: "id-front" | "id-back", file: Blob, next: Step) {
     const form = new FormData();
-    form.append("image", file);
+    form.append("image", file, path === "id-back" ? "id_back.png" : "id_front.jpg");
     if (await upload(path, form)) setStep(next);
   }
+
+  // Stable reference so the scanner's camera effect doesn't restart on every render.
+  const onBarcode = useCallback((png: Blob) => uploadPhoto("id-back", png, "selfie"), [session]);
 
   async function uploadSelfie(frames: Blob[]) {
     const form = new FormData();
@@ -73,8 +77,10 @@ export default function IdVerification({ onDone }: { onDone?: (verified: boolean
           busy={busy} onPhoto={(f) => uploadPhoto("id-front", f, "back")} />
       )}
       {step === "back" && (
-        <PhotoStep title="Step 2 of 3: Back of your ID" hint="Make sure the barcode is sharp and fully visible."
-          busy={busy} onPhoto={(f) => uploadPhoto("id-back", f, "selfie")} />
+        <>
+          <h3>Step 2 of 3: Back of your ID</h3>
+          {busy ? <p>Checking barcode...</p> : <BarcodeScanner onCapture={onBarcode} />}
+        </>
       )}
       {step === "selfie" && <SelfieStep busy={busy} onFrames={uploadSelfie} />}
       {step === "checking" && <p>Checking...</p>}

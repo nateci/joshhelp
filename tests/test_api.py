@@ -41,6 +41,20 @@ def test_parse_canadian_dates():
     assert out["date_of_birth"] == date(1990, 1, 7)
 
 
+def test_parse_version1_full_name():
+    out = aamva.parse_aamva("@\n\x1e\rANSI 6360000101DL00290190DLDAAMOSS,JOHN,Q\nDBB19850315\nDBA20990315\n")
+    assert (out["first_name"], out["last_name"], out["name"]) == ("JOHN", "MOSS", "JOHN Q MOSS")
+    assert out["date_of_birth"].year == 1985
+
+
+def test_barcode_found_in_large_photo():
+    # barcode small inside a 12MP-ish photo, like a phone shot of the whole card
+    code = cv2.imdecode(np.frombuffer(_barcode_png(SAMPLE), np.uint8), cv2.IMREAD_COLOR)
+    photo = np.full((3000, 4000, 3), 180, np.uint8)
+    photo[1200:1200 + code.shape[0], 1500:1500 + code.shape[1]] = code
+    assert aamva.read_barcode(photo) is not None
+
+
 def test_barcode_roundtrip():
     img = cv2.imdecode(np.frombuffer(_barcode_png(SAMPLE), np.uint8), cv2.IMREAD_COLOR)
     assert aamva.parse_aamva(aamva.read_barcode(img))["last_name"] == "SAMPLE"

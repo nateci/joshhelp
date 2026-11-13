@@ -30,6 +30,7 @@ You can copy the Next.js side straight from [examples/nextjs/](examples/nextjs/)
 - [app/api/verify/start/route.ts](examples/nextjs/app/api/verify/start/route.ts) creates the session on the server.
 - [app/api/verify/result/route.ts](examples/nextjs/app/api/verify/result/route.ts) fetches the verdict and saves it.
 - [components/IdVerification.tsx](examples/nextjs/components/IdVerification.tsx) is the 3-step UI with the camera and head-turn prompts. Usage: `<IdVerification onDone={(ok) => ...} />`.
+- [components/BarcodeScanner.tsx](examples/nextjs/components/BarcodeScanner.tsx) scans the barcode on the back of the ID **live on the phone** with `zxing-wasm` (`npm i zxing-wasm`). It only captures once the barcode decodes, which is how Stripe avoids blurry uploads. The server still decodes the image itself, so the client is never trusted. If scanning takes over 20 seconds, it offers a plain photo upload instead.
 
 Set these environment variables in the Next.js app (on Vercel): `VERIFY_API_URL` and `VERIFY_API_KEY`.
 
