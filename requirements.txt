@@ -1,0 +1,10 @@
+fastapi>=0.115
+uvicorn[standard]
+python-multipart
+opencv-python-headless>=4.8,<5
+zxing-cpp>=2.2
+numpy
+
+# dev
+pytest
+httpx
