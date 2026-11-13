@@ -1,16 +1,26 @@
 "use client";
 // Live, on-device PDF417 scanning for the back of the ID (the Stripe approach).
 // The phone scans the camera feed several times a second with zxing-wasm (the same zxing
-// engine the server uses) and only captures once the barcode actually decodes, so users
-// can't submit a blurry photo. The captured frame is uploaded and the SERVER re-decodes it;
-// nothing decoded here is trusted.
+// engine the server uses) and captures as soon as the barcode decodes. The captured crop is
+// uploaded and the SERVER re-decodes it; nothing decoded here is trusted.
+//
+// Built to be forgiving:
+//  - scans the WHOLE camera frame; the box on screen is only a hint, not a requirement
+//  - zooms the camera in (where supported) so people can hold the card farther away,
+//    where phone cameras can actually focus
+//  - alternates reader settings every frame (glare-friendly binarizer, denoising)
+//  - accepts any PDF417 barcode; the server decides whether it's a valid ID
+//  - photo upload option appears after a few seconds instead of making people wait
 //
 //   npm i zxing-wasm
 //   <BarcodeScanner onCapture={(png) => upload(png)} />
 import { useEffect, useRef, useState } from "react";
 
-const SCAN_EVERY_MS = 200;
-const FALLBACK_AFTER_MS = 20000; // offer a plain photo upload if scanning takes too long
+const SCAN_EVERY_MS = 120;
+const FALLBACK_AFTER_MS = 8000;
+const ZOOM = 2; // lets the user hold the card ~15cm away and still get a big, sharp barcode
+
+type Point = { x: number; y: number };
 
 export default function BarcodeScanner({ onCapture }: { onCapture: (image: Blob) => void }) {
   const video = useRef<HTMLVideoElement>(null);
@@ -22,6 +32,7 @@ export default function BarcodeScanner({ onCapture }: { onCapture: (image: Blob)
     let stream: MediaStream | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
+    let frame = 0;
     const canvas = document.createElement("canvas");
     const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
 
@@ -29,7 +40,7 @@ export default function BarcodeScanner({ onCapture }: { onCapture: (image: Blob)
       const { readBarcodes } = await import("zxing-wasm/reader"); // loads the WASM on the client only
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } },
+          video: { facingMode: "environment", width: { ideal: 2560 }, height: { ideal: 1440 } },
         });
       } catch {
         setStatus("Camera access is needed. You can upload a photo instead.");
@@ -37,39 +48,44 @@ export default function BarcodeScanner({ onCapture }: { onCapture: (image: Blob)
         return;
       }
       const track = stream.getVideoTracks()[0];
-      // Continuous autofocus where the browser supports it (Android Chrome); ignored elsewhere.
-      track.applyConstraints({ advanced: [{ focusMode: "continuous" } as MediaTrackConstraintSet] }).catch(() => {});
+      // Continuous autofocus + zoom where supported (mostly Android Chrome); silently ignored elsewhere.
+      const caps = (track.getCapabilities?.() ?? {}) as MediaTrackCapabilities & { zoom?: { min: number; max: number } };
+      const advanced: Record<string, unknown>[] = [{ focusMode: "continuous" }];
+      if (caps.zoom) advanced.push({ zoom: Math.min(ZOOM, caps.zoom.max) });
+      track.applyConstraints({ advanced } as MediaTrackConstraints).catch(() => {});
+
       video.current!.srcObject = stream;
       await video.current!.play().catch(() => {});
-      setStatus("Hold the back of your ID so the barcode fills the box");
+      setStatus("Show the barcode on the back of your ID");
       setTimeout(() => !stopped && setFallback(true), FALLBACK_AFTER_MS);
 
       const scan = async () => {
         if (stopped) return;
         const v = video.current!;
         if (v.videoWidth) {
-          // Only scan the guide box (center 90% x 50%): faster, and ignores the rest of the card.
-          const w = Math.round(v.videoWidth * 0.9), h = Math.round(v.videoHeight * 0.5);
-          canvas.width = w;
-          canvas.height = h;
-          ctx.drawImage(v, (v.videoWidth - w) / 2, (v.videoHeight - h) / 2, w, h, 0, 0, w, h);
-          const results = await readBarcodes(ctx.getImageData(0, 0, w, h), {
+          canvas.width = v.videoWidth;
+          canvas.height = v.videoHeight;
+          ctx.drawImage(v, 0, 0);
+          const odd = frame++ % 2 === 1;
+          const results = await readBarcodes(ctx.getImageData(0, 0, canvas.width, canvas.height), {
             formats: ["PDF417"],
             tryHarder: true,
+            tryDenoise: odd,
+            binarizer: odd ? "GlobalHistogram" : "LocalAverage", // GlobalHistogram copes better with glare
             maxNumberOfSymbols: 1,
           });
-          // AAMVA barcodes on licenses contain "ANSI " (or "AAMVA" on very old cards).
-          const hit = results.find((r) => r.isValid && /ANSI|AAMVA/.test(r.text));
+          const hit = results.find((r) => r.isValid);
           if (hit) {
             stopped = true;
             setDone(true);
             setStatus("Got it!");
-            // Lossless PNG of the exact frame that decoded, so the server decodes it too.
-            canvas.toBlob((b) => b && onCapture(b), "image/png");
+            cropAround(canvas, Object.values(hit.position)).toBlob((b) => b && onCapture(b), "image/png");
             stream?.getTracks().forEach((t) => t.stop());
             return;
           }
-          if (results.length) setStatus("Almost... hold steady");
+          setStatus(
+            results.length ? "Almost... hold steady" : "Hold your ID about 6 inches (15 cm) away and keep it still",
+          );
         }
         timer = setTimeout(scan, SCAN_EVERY_MS);
       };
@@ -88,25 +104,37 @@ export default function BarcodeScanner({ onCapture }: { onCapture: (image: Blob)
     <div>
       <div style={{ position: "relative", borderRadius: 12, overflow: "hidden", background: "#000" }}>
         <video ref={video} playsInline muted style={{ width: "100%", display: "block" }} />
-        {/* guide box matches the scanned region: center 90% wide, 50% tall */}
+        {/* just a visual hint: the whole frame is scanned */}
         <div style={{
-          position: "absolute", left: "5%", right: "5%", top: "25%", bottom: "25%",
-          border: `3px solid ${done ? "#22c55e" : "#ffffffcc"}`, borderRadius: 8,
-          boxShadow: "0 0 0 9999px #0007",
+          position: "absolute", left: "6%", right: "6%", top: "22%", bottom: "22%",
+          border: `3px ${done ? "solid #22c55e" : "dashed #ffffffaa"}`, borderRadius: 10,
         }} />
       </div>
       <p style={{ textAlign: "center", fontSize: 18 }}>{status}</p>
       <ul style={{ fontSize: 14, color: "#666" }}>
-        <li>Use good light, but tilt the card slightly if there's glare on the barcode.</li>
-        <li>Move closer until the barcode fills the box, then hold still.</li>
+        <li>Too blurry? Move the card a little farther away.</li>
+        <li>Glare on the barcode? Tilt the card slightly.</li>
       </ul>
       {fallback && !done && (
         <label style={{ display: "block", marginTop: 8 }}>
-          Having trouble? Take a photo instead:{" "}
+          Still not scanning? Take a photo instead:{" "}
           <input type="file" accept="image/*" capture="environment"
             onChange={(e) => e.target.files?.[0] && onCapture(e.target.files[0])} />
         </label>
       )}
     </div>
   );
+}
+
+/** Lossless crop of the barcode plus generous padding: a small upload the server decodes easily. */
+function cropAround(src: HTMLCanvasElement, pts: Point[]): HTMLCanvasElement {
+  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+  const pad = 0.25 * Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys));
+  const x0 = Math.max(0, Math.min(...xs) - pad), y0 = Math.max(0, Math.min(...ys) - pad);
+  const x1 = Math.min(src.width, Math.max(...xs) + pad), y1 = Math.min(src.height, Math.max(...ys) + pad);
+  const out = document.createElement("canvas");
+  out.width = Math.round(x1 - x0);
+  out.height = Math.round(y1 - y0);
+  out.getContext("2d")!.drawImage(src, x0, y0, out.width, out.height, 0, 0, out.width, out.height);
+  return out;
 }
